@@ -1,0 +1,26 @@
+{
+  "season": "fallback",
+  "updated": "2026-03-02T00:00:00Z",
+  "ranks": {
+    "LIV": 1,
+    "ARS": 2,
+    "MCI": 3,
+    "CHE": 4,
+    "NEW": 5,
+    "TOT": 6,
+    "AVL": 7,
+    "BHA": 8,
+    "MUN": 9,
+    "WHU": 10,
+    "BRE": 11,
+    "CRY": 12,
+    "FUL": 13,
+    "EVE": 14,
+    "WOL": 15,
+    "NFO": 16,
+    "BOU": 17,
+    "LEE": 18,
+    "SUN": 19,
+    "BUR": 20
+  }
+}
