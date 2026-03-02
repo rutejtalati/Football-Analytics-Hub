@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dotenv import load_dotenv
-load_dotenv()
 
 import json
 import os
@@ -29,6 +28,9 @@ from leagues import list_leagues
 from league_client import fetch_fixtures as fetch_league_fixtures, fetch_standings as fetch_league_standings
 from prediction import estimate_team_strengths, predict_fixture
 
+BACKEND_DIR = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=BACKEND_DIR / ".env")
+
 app = FastAPI(title="FPL Predicted Points API", version="2.0.0")
 
 # --- CORS (allow your frontend dev servers) ---
@@ -54,9 +56,13 @@ FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
 FALLBACK_STANDINGS_PATH = Path(__file__).with_name("standings_fallback.json")
 LEAGUE_CODE_MAP = {
     "PL": "PL",
+    "EPL": "PL",
     "PD": "PD",
+    "LALIGA": "PD",
     "SA": "SA",
+    "SERIEA": "SA",
     "FL1": "FL1",
+    "LIGUE1": "FL1",
 }
 
 
@@ -104,96 +110,114 @@ def _normalize_league_code(league_code: str) -> str:
 def _get_fd_key(failure_label: str) -> str:
     key = os.environ.get("FOOTBALL_DATA_API_KEY", "").strip()
     if not key:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch {failure_label}: FOOTBALL_DATA_API_KEY is not set.")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Failed to fetch {failure_label}: FOOTBALL_DATA_API_KEY is not set. "
+                "Set FOOTBALL_DATA_API_KEY in backend/.env and restart the backend."
+            ),
+        )
     return key
 
 
-def _fd_get(path: str, key: str) -> Dict[str, Any]:
+def _fd_get(path: str, key: str, failure_label: str) -> Dict[str, Any]:
     url = f"{FOOTBALL_DATA_BASE}{path}"
-    resp = requests.get(url, headers={"X-Auth-Token": key}, timeout=20)
+    try:
+        resp = requests.get(url, headers={"X-Auth-Token": key}, timeout=20)
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Failed to fetch {failure_label}: could not reach football-data.org. "
+                "Check FOOTBALL_DATA_API_KEY in backend/.env and your network."
+            ),
+        ) from exc
     if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"football-data error {resp.status_code}: {resp.text[:200]}")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Failed to fetch {failure_label}: football-data.org returned HTTP {resp.status_code}. "
+                "Verify FOOTBALL_DATA_API_KEY in backend/.env."
+            ),
+        )
     try:
         return resp.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail="football-data returned non-JSON response.")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to fetch {failure_label}: football-data.org returned invalid JSON.",
+        ) from exc
 
 
-@app.get("/api/league/{league_code}/fixtures")
-def api_league_fixtures(league_code: str, days: int = Query(default=14, ge=1, le=60)) -> Dict[str, Any]:
-    league_code = _normalize_league_code(league_code)
-    key = os.environ.get("FOOTBALL_DATA_API_KEY", "").strip()
-    if not key:
-        raise HTTPException(status_code=502, detail="Failed to fetch fixtures: FOOTBALL_DATA_API_KEY is not set.")
-    payload = _fd_get(f"/competitions/{league_code}/matches?status=SCHEDULED", key)
-    now = datetime.now(timezone.utc)
-    upper = now + timedelta(days=int(days))
-
-    fixtures = []
-    for m in payload.get("matches", []) or []:
-        utc_date = str(m.get("utcDate") or "")
-        try:
-            dt = datetime.fromisoformat(utc_date.replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if not (now <= dt <= upper):
-            continue
-        fixtures.append({
-            "utcDate": m.get("utcDate"),
-            "date": m.get("utcDate"),
-            "home": m.get("homeTeam", {}).get("name", ""),
-            "away": m.get("awayTeam", {}).get("name", ""),
-            "status": m.get("status") or "SCHEDULED",
-            "matchday": m.get("matchday"),
-            "competition": league_code,
-        })
-    fixtures.sort(key=lambda x: x["utcDate"])
-    return {"league": league_code, "fixtures": fixtures}
-
-
-@app.get("/api/league/{league_code}/table")
-def api_league_table(league_code: str) -> Dict[str, Any]:
-    code = _normalize_league_code(league_code)
-    key = os.environ.get("FOOTBALL_DATA_API_KEY", "").strip()
-    if not key:
-        raise HTTPException(status_code=503, detail="Failed to fetch table: FOOTBALL_DATA_API_KEY is not set.")
-    try:
-        payload = _fd_get(f"/competitions/{code}/standings", key)
-    except HTTPException as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch table: {getattr(e, 'detail', 'unknown error')}") from e
+def _extract_total_standings_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     standings = payload.get("standings", []) or []
-    table_rows = []
+    table_rows: List[Dict[str, Any]] = []
     for s in standings:
         if str(s.get("type", "")).upper() == "TOTAL":
             table_rows = s.get("table", []) or []
             break
     if not table_rows and standings:
         table_rows = standings[0].get("table", []) or []
+    return table_rows
 
-    out_rows: List[Dict[str, Any]] = []
-    for r in table_rows:
-        t = r.get("team", {}) or {}
-        team_name = str(t.get("name") or t.get("shortName") or "").strip()
-        out_rows.append(
+
+def _normalize_standings_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for r in _extract_total_standings_rows(payload):
+        team = r.get("team", {}) or {}
+        goals_for = _to_int(r.get("goalsFor"), 0)
+        goals_against = _to_int(r.get("goalsAgainst"), 0)
+        rows.append(
             {
                 "position": _to_int(r.get("position"), 0),
-                "team": team_name,
+                "teamName": str(team.get("name") or ""),
+                "teamShort": str(team.get("shortName") or team.get("tla") or team.get("name") or ""),
                 "playedGames": _to_int(r.get("playedGames"), 0),
                 "won": _to_int(r.get("won"), 0),
                 "draw": _to_int(r.get("draw"), 0),
                 "lost": _to_int(r.get("lost"), 0),
-                "goalsFor": _to_int(r.get("goalsFor"), 0),
-                "goalsAgainst": _to_int(r.get("goalsAgainst"), 0),
-                "goalDifference": _to_int(r.get("goalDifference"), 0),
                 "points": _to_int(r.get("points"), 0),
-                "form": r.get("form"),
-                # backward-compatible aliases
-                "pos": _to_int(r.get("position"), 0),
-                "played": _to_int(r.get("playedGames"), 0),
-                "gd": _to_int(r.get("goalDifference"), 0),
-                "pts": _to_int(r.get("points"), 0),
+                "goalsFor": goals_for,
+                "goalsAgainst": goals_against,
+                "goalDifference": _to_int(r.get("goalDifference"), goals_for - goals_against),
             }
         )
+    return sorted(rows, key=lambda x: x.get("position", 0))
+
+
+@app.get("/api/league/{league}/fixtures")
+def api_league_fixtures(league: str, days: int = Query(default=14, ge=1, le=60)) -> Dict[str, Any]:
+    code = _normalize_league_code(league)
+    key = _get_fd_key("fixtures")
+    today = datetime.now(timezone.utc).date()
+    end = today + timedelta(days=int(days))
+    payload = _fd_get(
+        f"/competitions/{code}/matches?dateFrom={today.isoformat()}&dateTo={end.isoformat()}",
+        key,
+        "fixtures",
+    )
+    fixtures: List[Dict[str, Any]] = []
+    for match in payload.get("matches", []) or []:
+        fixtures.append(
+            {
+                "utcDate": match.get("utcDate"),
+                "matchday": _to_int(match.get("matchday"), 0),
+                "competition": code,
+                "venue": (match.get("venue") or "Home"),
+                "home": str((match.get("homeTeam") or {}).get("name") or ""),
+                "away": str((match.get("awayTeam") or {}).get("name") or ""),
+            }
+        )
+    fixtures.sort(key=lambda x: str(x.get("utcDate") or ""))
+    return {"league": code, "fixtures": fixtures}
+
+
+@app.get("/api/league/{league_code}/table")
+def api_league_table(league_code: str) -> Dict[str, Any]:
+    code = _normalize_league_code(league_code)
+    key = _get_fd_key("standings")
+    payload = _fd_get(f"/competitions/{code}/standings", key, "standings")
+    out_rows = _normalize_standings_rows(payload)
     return {
         "league": code,
         "updated": datetime.now(timezone.utc).isoformat(),
@@ -202,38 +226,12 @@ def api_league_table(league_code: str) -> Dict[str, Any]:
     }
 
 
-@app.get("/api/league/{code}/standings")
-def api_league_standings(code: str) -> Dict[str, Any]:
-    # Backward-compatible normalized standings endpoint.
-    mapped = _normalize_league_code(code)
+@app.get("/api/league/{league}/standings")
+def api_league_standings(league: str) -> Dict[str, Any]:
+    code = _normalize_league_code(league)
     key = _get_fd_key("standings")
-    payload = _fd_get(f"/competitions/{mapped}/standings", key)
-    standings = payload.get("standings", []) or []
-    table_rows = []
-    for s in standings:
-        if str(s.get("type", "")).upper() == "TOTAL":
-            table_rows = s.get("table", []) or []
-            break
-    if not table_rows and standings:
-        table_rows = standings[0].get("table", []) or []
-    rows = []
-    for r in table_rows:
-        t = r.get("team", {}) or {}
-        gf = _to_int(r.get("goalsFor"), 0)
-        ga = _to_int(r.get("goalsAgainst"), 0)
-        rows.append(
-            {
-                "position": _to_int(r.get("position"), 0),
-                "team_name": str(t.get("shortName") or t.get("name") or ""),
-                "team_id": _to_int(t.get("id"), 0),
-                "played": _to_int(r.get("playedGames"), 0),
-                "points": _to_int(r.get("points"), 0),
-                "gf": gf,
-                "ga": ga,
-                "gd": gf - ga,
-            }
-        )
-    return {"league": {"code": mapped, "name": mapped, "competition_id": mapped}, "rows": rows}
+    payload = _fd_get(f"/competitions/{code}/standings", key, "standings")
+    return {"league": code, "standings": _normalize_standings_rows(payload)}
 
 
 @app.get("/api/league/{code}/predictions")

@@ -53,6 +53,42 @@ body {
   outline: 2px solid rgba(255,255,255,0.25);
 }
 
+.leagueIconsWrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.leagueIconsLabel {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 700;
+}
+
+.leagueIcons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.leagueIconBtn {
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.leagueIconBtn:hover {
+  border-color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.18);
+}
+
 .content { padding: 16px 18px; flex: 1; }
 
 .panel {
@@ -1048,8 +1084,8 @@ td.heat-green:hover {
   border-top: 1px solid rgba(255, 255, 255, 0.16);
   padding-top: 10px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(220px, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(220px, 1fr);
+  gap: 8px;
 }
 
 .legendCol {

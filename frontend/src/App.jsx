@@ -548,8 +548,7 @@ export default function App() {
   const [leagueMode, setLeagueMode] = useState("predictions");
   const [leagueLoading, setLeagueLoading] = useState(false);
   const [leagueData, setLeagueData] = useState({ fixtures: [], predictions: [], table: [], error: "" });
-  const [leagueTable, setLeagueTable] = useState({ rows: [], formMap: null, loading: false, error: "" });
-  const [predMenuOpen, setPredMenuOpen] = useState(false);
+  const [leagueTable, setLeagueTable] = useState({ rows: [], loading: false, error: "" });
 
   const rowRefs = useRef({});
   const flashTimeoutRef = useRef(null);
@@ -1112,11 +1111,11 @@ export default function App() {
     setSelectedLeague(league);
     setPage("league");
     setLeagueData({ fixtures: [], predictions: [], table: [], error: "" });
-    setLeagueTable({ rows: [], formMap: null, loading: true, error: "" });
+    setLeagueTable({ rows: [], loading: true, error: "" });
     try {
       const [fxRes, tblRes] = await Promise.all([
         fetch(`/api/league/${league.code}/fixtures?days=14`),
-        fetch(`/api/league/${league.code}/table`),
+        fetch(`/api/league/${league.code}/standings`),
       ]);
       if (!fxRes.ok) {
         const text = await fxRes.text().catch(() => "");
@@ -1127,21 +1126,15 @@ export default function App() {
 
       if (!tblRes.ok) {
         const text = await tblRes.text().catch(() => "");
-        setLeagueTable({ rows: [], formMap: null, loading: false, error: `Could not load league table (${tblRes.status}). ${text}` });
+        setLeagueTable({ rows: [], loading: false, error: `Could not load league table (${tblRes.status}). ${text}` });
       } else {
         const tblData = await tblRes.json();
-        const rows = Array.isArray(tblData?.table) ? tblData.table : [];
-        const formMap = {};
-        rows.forEach((r) => {
-          const teamName = String(r?.team || r?.team_name || "").trim();
-          const form = r?.form;
-          if (teamName && typeof form === "string" && form.trim()) formMap[teamName] = form.trim();
-        });
-        setLeagueTable({ rows, formMap: Object.keys(formMap).length ? formMap : null, loading: false, error: "" });
+        const rows = Array.isArray(tblData?.standings) ? tblData.standings : [];
+        setLeagueTable({ rows, loading: false, error: "" });
       }
     } catch (e) {
       setLeagueData({ fixtures: [], predictions: [], table: [], error: `Could not load fixtures for ${league.name}. ${String(e)}` });
-      setLeagueTable({ rows: [], formMap: null, loading: false, error: "" });
+      setLeagueTable({ rows: [], loading: false, error: "" });
     } finally {
       setLeagueLoading(false);
     }
@@ -1153,11 +1146,11 @@ export default function App() {
     setSelectedLeague(league);
     setPage("league");
     setLeagueData({ fixtures: [], predictions: [], table: [], error: "" });
-    setLeagueTable({ rows: [], formMap: null, loading: true, error: "" });
+    setLeagueTable({ rows: [], loading: true, error: "" });
     try {
       const [predRes, tblRes] = await Promise.all([
         fetch(`/api/league/${league.code}/predictions?days=14`),
-        fetch(`/api/league/${league.code}/table`),
+        fetch(`/api/league/${league.code}/standings`),
       ]);
       if (!predRes.ok) throw new Error(`Predictions endpoint unavailable (${predRes.status}).`);
       const predData = await predRes.json();
@@ -1165,21 +1158,15 @@ export default function App() {
 
       if (!tblRes.ok) {
         const text = await tblRes.text().catch(() => "");
-        setLeagueTable({ rows: [], formMap: null, loading: false, error: `Could not load league table (${tblRes.status}). ${text}` });
+        setLeagueTable({ rows: [], loading: false, error: `Could not load league table (${tblRes.status}). ${text}` });
       } else {
         const tblData = await tblRes.json();
-        const rows = Array.isArray(tblData?.table) ? tblData.table : [];
-        const formMap = {};
-        rows.forEach((r) => {
-          const teamName = String(r?.team || r?.team_name || "").trim();
-          const form = r?.form;
-          if (teamName && typeof form === "string" && form.trim()) formMap[teamName] = form.trim();
-        });
-        setLeagueTable({ rows, formMap: Object.keys(formMap).length ? formMap : null, loading: false, error: "" });
+        const rows = Array.isArray(tblData?.standings) ? tblData.standings : [];
+        setLeagueTable({ rows, loading: false, error: "" });
       }
     } catch (e) {
       setLeagueData({ fixtures: [], predictions: [], table: [], error: `Could not load predictions for ${league.name}. ${String(e)}` });
-      setLeagueTable({ rows: [], formMap: null, loading: false, error: "" });
+      setLeagueTable({ rows: [], loading: false, error: "" });
     } finally {
       setLeagueLoading(false);
     }
@@ -1191,26 +1178,20 @@ export default function App() {
     setSelectedLeague(league);
     setPage("league");
     setLeagueData({ fixtures: [], predictions: [], table: [], error: "" });
-    setLeagueTable({ rows: [], formMap: null, loading: true, error: "" });
+    setLeagueTable({ rows: [], loading: true, error: "" });
     try {
-      const res = await fetch(`/api/league/${league.code}/table`);
+      const res = await fetch(`/api/league/${league.code}/standings`);
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(`Table endpoint unavailable (${res.status}). ${text}`);
       }
       const data = await res.json();
-      const rows = Array.isArray(data?.table) ? data.table : [];
-      const formMap = {};
-      rows.forEach((r) => {
-        const teamName = String(r?.team || r?.team_name || "").trim();
-        const form = r?.form;
-        if (teamName && typeof form === "string" && form.trim()) formMap[teamName] = form.trim();
-      });
+      const rows = Array.isArray(data?.standings) ? data.standings : [];
       setLeagueData({ fixtures: [], predictions: [], table: rows, error: "" });
-      setLeagueTable({ rows, formMap: Object.keys(formMap).length ? formMap : null, loading: false, error: "" });
+      setLeagueTable({ rows, loading: false, error: "" });
     } catch (e) {
       setLeagueData({ fixtures: [], predictions: [], table: [], error: `Could not load table for ${league.name}. ${String(e)}` });
-      setLeagueTable({ rows: [], formMap: null, loading: false, error: "" });
+      setLeagueTable({ rows: [], loading: false, error: "" });
     } finally {
       setLeagueLoading(false);
     }
@@ -1232,7 +1213,7 @@ export default function App() {
 
         <nav className="nav">
           <button type="button" className={page === "table" ? "active" : ""} onClick={() => setPage("table")}>
-            Home / Table
+            Home
           </button>
           <button type="button" className={page === "load" ? "active" : ""} onClick={() => setPage("load")}>
             Load Squad
@@ -1243,27 +1224,15 @@ export default function App() {
           <button type="button" className={page === "best" ? "active" : ""} onClick={() => setPage("best")}>
             Best Team (GW)
           </button>
-          <div className="predWrap">
-            <button type="button" className={`predBtn ${predMenuOpen ? "active" : ""}`} onClick={() => setPredMenuOpen((v) => !v)}>
-              Predictions
-            </button>
-            {predMenuOpen ? (
-              <div className="predMenu">
-                {LEAGUE_CARDS.map((lg) => (
-                  <button
-                    key={`pred_${lg.code}`}
-                    type="button"
-                    className="predItem"
-                    onClick={() => {
-                      setPredMenuOpen(false);
-                      loadLeagueFixtures(lg);
-                    }}
-                  >
-                    {lg.name}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+          <div className="leagueIconsWrap">
+            <span className="leagueIconsLabel">Predictions</span>
+            <div className="leagueIcons">
+              {LEAGUE_CARDS.map((lg) => (
+                <button key={`pred_${lg.code}`} type="button" className="leagueIconBtn" title={lg.subtitle} onClick={() => loadLeagueFixtures(lg)}>
+                  {lg.name}
+                </button>
+              ))}
+            </div>
           </div>
         </nav>
       </header>
@@ -1273,7 +1242,7 @@ export default function App() {
         {page === "league" ? (
           <section className="panel">
             <div className="row" style={{ justifyContent: "space-between" }}>
-              <h2>{selectedLeague?.name || "League"} - Next Matches & Predictions</h2>
+              <h2>{selectedLeague?.name || "League"} - Fixtures, Predictions & Table</h2>
               <button type="button" className="btn ghost" onClick={() => setPage("table")}>
                 Home
               </button>
@@ -1282,17 +1251,17 @@ export default function App() {
             <div className="row">
               <button
                 type="button"
-                className={`btn ${leagueMode === "predictions" ? "" : "ghost"}`}
-                onClick={() => selectedLeague && loadLeaguePredictions(selectedLeague)}
-              >
-                Predictions
-              </button>
-              <button
-                type="button"
                 className={`btn ${leagueMode === "fixtures" ? "" : "ghost"}`}
                 onClick={() => selectedLeague && loadLeagueFixtures(selectedLeague)}
               >
                 Fixtures
+              </button>
+              <button
+                type="button"
+                className={`btn ${leagueMode === "predictions" ? "" : "ghost"}`}
+                onClick={() => selectedLeague && loadLeaguePredictions(selectedLeague)}
+              >
+                Predictions
               </button>
               <button
                 type="button"
@@ -1325,13 +1294,14 @@ export default function App() {
                           <th title="Home side for this fixture.">Home</th>
                           <th title="Away side for this fixture.">Away</th>
                           <th title="Scheduled kickoff in your local timezone.">Kickoff</th>
+                          <th title="Venue for this fixture.">Venue</th>
                           <th title="Primary scoreline predicted by the model.">Model Score</th>
                           <th title="Model probability that the home team wins.">Home Win Chance</th>
                           <th title="Model probability of a draw.">Draw Chance</th>
                           <th title="Model probability that the away team wins.">Away Win Chance</th>
                           <th title="Entropy of (Home/Draw/Away) probabilities. Higher = more uncertain.">Outcome Uncertainty</th>
-                          <th title="Expected goals for the home side.">Home xG</th>
-                          <th title="Expected goals for the away side.">Away xG</th>
+                          <th title="Expected goals for the home side.">xG H</th>
+                          <th title="Expected goals for the away side.">xG A</th>
                           <th title="Combined expected goals in this match.">Expected Game Goals</th>
                           <th title="Probability of over 2.5 total goals.">Over 2.5 Goals</th>
                           <th title="Probability both teams score at least once.">Both Teams Score</th>
@@ -1373,6 +1343,7 @@ export default function App() {
                                   <td>{home || "-"}</td>
                                   <td>{away || "-"}</td>
                                   <td>{r.utc_date ? new Date(r.utc_date).toLocaleString() : "-"}</td>
+                                  <td>{r.venue || "Home"}</td>
                                   <td>{pred.predicted_score || pred.most_likely_score || "-"}</td>
                                   <td className={getHeatClass("homeWinPct", pHome)}>{pct(pHome)}</td>
                                   <td className={getHeatClass("drawPct", pDraw)}>{pct(pDraw)}</td>
@@ -1402,24 +1373,29 @@ export default function App() {
                     <table className="tbl">
                       <thead>
                         <tr>
-                          <th>Fixture</th>
+                          <th>Matchday</th>
                           <th>Date</th>
-                          <th>Status</th>
+                          <th>Home</th>
+                          <th>Away</th>
+                          <th>Venue</th>
                         </tr>
                       </thead>
                       <tbody>
                         {leagueData.fixtures.map((r, idx) => (
                           <tr key={`lf_${r.match_id || idx}`}>
                             {(() => {
-                              const when = r.date || r.utcDate || r.kickoff || "-";
-                              const status = r.status || r.state || "-";
-                              const home = r.home || r.homeTeam || "";
-                              const away = r.away || r.awayTeam || "";
+                              const when = r.utcDate || r.date || r.kickoff || "-";
+                              const home = r.home || r.homeTeam || r.home_team_name || "";
+                              const away = r.away || r.awayTeam || r.away_team_name || "";
+                              const venue = r.venue || "Home";
+                              const matchday = Number(r.matchday) || "-";
                               return (
                                 <>
-                                  <td>{home} vs {away}</td>
-                                  <td>{when !== "-" ? new Date(when).toLocaleDateString() : "-"}</td>
-                                  <td>{status}</td>
+                                  <td>{matchday}</td>
+                                  <td>{when !== "-" ? new Date(when).toLocaleString() : "-"}</td>
+                                  <td>{home || "-"}</td>
+                                  <td>{away || "-"}</td>
+                                  <td>{venue}</td>
                                 </>
                               );
                             })()}
@@ -1451,16 +1427,16 @@ export default function App() {
                         {(() => {
                           const rows = [...(leagueTable.rows || [])]
                             .map((r) => ({
-                              position: Number(r.position ?? r.pos ?? 0),
-                              team: r.team ?? r.team_name ?? "-",
-                              playedGames: Number(r.playedGames ?? r.played ?? 0),
+                              position: Number(r.position ?? 0),
+                              team: r.teamName ?? r.teamShort ?? r.team ?? "-",
+                              playedGames: Number(r.playedGames ?? 0),
                               won: Number(r.won ?? 0),
                               draw: Number(r.draw ?? 0),
                               lost: Number(r.lost ?? 0),
-                              goalsFor: Number(r.goalsFor ?? r.gf ?? 0),
-                              goalsAgainst: Number(r.goalsAgainst ?? r.ga ?? 0),
-                              goalDifference: Number(r.goalDifference ?? r.gd ?? 0),
-                              points: Number(r.points ?? r.pts ?? 0),
+                              goalsFor: Number(r.goalsFor ?? 0),
+                              goalsAgainst: Number(r.goalsAgainst ?? 0),
+                              goalDifference: Number(r.goalDifference ?? 0),
+                              points: Number(r.points ?? 0),
                             }))
                             .sort((a, b) => a.position - b.position);
                           const totalTeams = rows.length;
@@ -1491,22 +1467,10 @@ export default function App() {
 
                     <div className="leagueLegend">
                       <div className="legendCol">
-                        <div className="legendTitle">Qualification/Relegation</div>
-                        <div className="legendItem"><span className="legendSwatch swatch-ucl" /> UEFA Champions League group stage</div>
-                        <div className="legendItem"><span className="legendSwatch swatch-uel" /> Europa League group stage</div>
-                        <div className="legendItem"><span className="legendSwatch swatch-rel" /> Relegation</div>
-                      </div>
-                      <div className="legendCol">
-                        <div className="legendTitle">Last 5 matches</div>
-                        {leagueTable.formMap ? (
-                          <div className="legendItemGroup">
-                            <span className="formPill formW">W</span>
-                            <span className="formPill formD">D</span>
-                            <span className="formPill formL">L</span>
-                          </div>
-                        ) : (
-                          <div className="muted">(Form unavailable)</div>
-                        )}
+                        <div className="legendTitle">Position colors</div>
+                        <div className="legendItem"><span className="legendSwatch swatch-ucl" /> Positions 1-4</div>
+                        <div className="legendItem"><span className="legendSwatch swatch-uel" /> Position 5</div>
+                        <div className="legendItem"><span className="legendSwatch swatch-rel" /> Bottom 3 positions</div>
                       </div>
                     </div>
                   </div>
@@ -1665,10 +1629,10 @@ export default function App() {
 
                 <div className="builderMetrics">
                   <div>
-                    Projected XI points (no captain boost): <b>{intPts(xiNoCap)}</b>
+                    Projected XI points (base): <b>{intPts(xiNoCap)}</b>
                   </div>
                   <div>
-                    Projected XI points (with captain double): <b>{intPts(xiWithCap)}</b>
+                    Projected XI points (with C bonus): <b>{intPts(xiWithCap)}</b>
                   </div>
                 </div>
 
@@ -1763,11 +1727,8 @@ export default function App() {
 
                 {toastMsg ? <div className="toastMsg">{toastMsg}</div> : null}
 
-                <div className="captainNote">
-                  Captain points are doubled for the Gameweek. If Captain plays 0 minutes, Vice-Captain gets doubled points instead. If neither plays, no double points are awarded.
-                </div>
                 <div className="muted">
-                  Captain: <b>{captainPlayer?.player_name || "-"}</b> | Vice-Captain: <b>{vicePlayer?.player_name || "-"}</b>
+                  C: <b>{captainPlayer?.player_name || "-"}</b> | V: <b>{vicePlayer?.player_name || "-"}</b>
                 </div>
 
                 <div className="transferPanel">
@@ -1854,8 +1815,8 @@ export default function App() {
                   {showTransferRules ? (
                     <div className="captainNote">
                       FT: you gain 1 free transfer per GW (can carry up to 5). Extra transfers cost -4 by default.
-                      Captain doubles points; Vice-Captain gets the double if captain plays 0 minutes.
-                      Chips (Bench Boost, Triple Captain, Wildcard, Free Hit) are single-use and should be tracked outside this panel.
+                      C doubles points; V gets the double if C plays 0 minutes.
+                      Chips (Bench Boost, Triple C, Wildcard, Free Hit) are single-use and should be tracked outside this panel.
                     </div>
                   ) : null}
                 </div>
@@ -2119,7 +2080,7 @@ export default function App() {
                         })}
 
                         <td className={activeCol === "pts_rest" ? "colActiveCell" : ""} style={{ background: ptsRestBg }}>
-                          {n(p.pts_rest).toFixed(1)}
+                          {intPts(n(p.pts_rest))}
                         </td>
 
                         <td className={activeCol === "value_rest" ? "colActiveCell" : ""}>{n(p.value_rest).toFixed(2)}</td>
