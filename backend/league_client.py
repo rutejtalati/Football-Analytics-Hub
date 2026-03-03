@@ -8,9 +8,15 @@ from typing import Any, Dict, List, Tuple
 import requests
 
 FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
-FOOTBALL_DATA_API_KEY = os.environ.get("FOOTBALL_DATA_API_KEY", "").strip()
-CACHE_TTL_SECONDS = int(os.environ.get("FOOTBALL_DATA_TTL_SECONDS", "900"))
+CACHE_TTL_SECONDS = int((os.getenv("FOOTBALL_DATA_TTL_SECONDS") or "900"))
 _CACHE: Dict[str, Tuple[float, Any]] = {}
+
+
+class UpstreamAPIError(Exception):
+    def __init__(self, status: int | None, safe_message: str):
+        super().__init__(safe_message)
+        self.status = status
+        self.safe_message = safe_message
 
 
 def _cache_get(key: str) -> Any:
@@ -30,12 +36,43 @@ def _cache_set(key: str, data: Any) -> Any:
 
 
 def _request(path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    if not FOOTBALL_DATA_API_KEY:
-        raise RuntimeError("FOOTBALL_DATA_API_KEY is not set.")
+    api_key = os.getenv("FOOTBALL_DATA_API_KEY")
+    api_key = (api_key or "").strip()
+    if not api_key:
+        raise UpstreamAPIError(status=503, safe_message="FOOTBALL_DATA_API_KEY is not set.")
     url = f"{FOOTBALL_DATA_BASE}{path}"
-    r = requests.get(url, params=params or {}, headers={"X-Auth-Token": FOOTBALL_DATA_API_KEY}, timeout=20)
-    r.raise_for_status()
-    return r.json()
+    try:
+        if "/standings" in path:
+            print("Fetching standings:", url)
+            print("API key present:", bool(api_key))
+        r = requests.get(
+            url,
+            params=params or {},
+            headers={
+                "X-Auth-Token": api_key,
+                "Accept": "application/json",
+            },
+            timeout=(10, 20),  # connect timeout, read timeout
+        )
+        if "/standings" in path:
+            print("Response status:", r.status_code)
+    except requests.exceptions.Timeout as exc:
+        raise UpstreamAPIError(status=503, safe_message="football-data timeout") from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise UpstreamAPIError(status=503, safe_message="Network connection failed to football-data.org") from exc
+    except requests.RequestException as exc:
+        raise UpstreamAPIError(status=502, safe_message=f"football-data request error: {str(exc)[:200]}") from exc
+
+    if r.status_code in {401, 403}:
+        raise UpstreamAPIError(status=502, safe_message="Invalid FOOTBALL_DATA_API_KEY")
+    if r.status_code == 429:
+        raise UpstreamAPIError(status=503, safe_message="football-data.org rate limit reached")
+    if r.status_code != 200:
+        raise UpstreamAPIError(status=502, safe_message=f"football-data error {r.status_code}: {r.text[:200]}")
+    try:
+        return r.json()
+    except ValueError as exc:
+        raise UpstreamAPIError(status=502, safe_message="football-data returned invalid JSON.") from exc
 
 
 def fetch_standings(comp_id: str) -> List[Dict[str, Any]]:

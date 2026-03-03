@@ -4,13 +4,14 @@ from dotenv import load_dotenv
 
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from fpl_client import fetch_bootstrap, fetch_fixtures, get_next_gw
@@ -25,7 +26,11 @@ from model import (
 
 import requests
 from leagues import list_leagues
-from league_client import fetch_fixtures as fetch_league_fixtures, fetch_standings as fetch_league_standings
+from league_client import (
+    UpstreamAPIError,
+    fetch_fixtures as fetch_league_fixtures,
+    fetch_standings as fetch_league_standings,
+)
 from prediction import estimate_team_strengths, predict_fixture
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -36,6 +41,10 @@ app = FastAPI(title="FPL Predicted Points API", version="2.0.0")
 origins = [
     "https://rutejtalati.github.io",
     "https://rutejtalati.github.io/Football-Analytics-Hub",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
 ]
 
 app.add_middleware(
@@ -63,6 +72,25 @@ LEAGUE_CODE_MAP = {
     "FL1": "FL1",
     "LIGUE1": "FL1",
 }
+PREDICTIONS_CACHE_TTL_SECONDS = 600
+_PREDICTIONS_CACHE: Dict[Tuple[str, int], Tuple[float, Dict[str, Any]]] = {}
+
+
+def _predictions_cache_get(code: str, days: int) -> Optional[Dict[str, Any]]:
+    key = (code, days)
+    row = _PREDICTIONS_CACHE.get(key)
+    if not row:
+        return None
+    expires_at, payload = row
+    if time.time() >= expires_at:
+        _PREDICTIONS_CACHE.pop(key, None)
+        return None
+    return payload
+
+
+def _predictions_cache_set(code: str, days: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _PREDICTIONS_CACHE[(code, days)] = (time.time() + PREDICTIONS_CACHE_TTL_SECONDS, payload)
+    return payload
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -107,7 +135,7 @@ def _normalize_league_code(league_code: str) -> str:
 
 
 def _get_fd_key(failure_label: str) -> str:
-    key = os.environ.get("FOOTBALL_DATA_API_KEY", "").strip()
+    key = (os.getenv("FOOTBALL_DATA_API_KEY") or "").strip()
     if not key:
         raise HTTPException(
             status_code=503,
@@ -122,22 +150,40 @@ def _get_fd_key(failure_label: str) -> str:
 def _fd_get(path: str, key: str, failure_label: str) -> Dict[str, Any]:
     url = f"{FOOTBALL_DATA_BASE}{path}"
     try:
-        resp = requests.get(url, headers={"X-Auth-Token": key}, timeout=20)
-    except requests.RequestException as exc:
+        if "/standings" in path:
+            print("Fetching standings:", url)
+            print("API key present:", bool(key))
+        resp = requests.get(
+            url,
+            headers={
+                "X-Auth-Token": key,
+                "Accept": "application/json",
+            },
+            timeout=(10, 20),
+        )
+        if "/standings" in path:
+            print("Response status:", resp.status_code)
+    except requests.exceptions.Timeout as exc:
         raise HTTPException(
             status_code=503,
-            detail=(
-                f"Failed to fetch {failure_label}: could not reach football-data.org. "
-                "Check FOOTBALL_DATA_API_KEY in backend/.env and your network."
-            ),
+            detail="football-data timeout",
         ) from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Network connection failed to football-data.org",
+        ) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"football-data request error: {str(exc)[:200]}") from exc
+
+    if resp.status_code in {401, 403}:
+        raise HTTPException(status_code=502, detail="Invalid FOOTBALL_DATA_API_KEY")
+    if resp.status_code == 429:
+        raise HTTPException(status_code=503, detail="football-data.org rate limit reached")
     if resp.status_code != 200:
         raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Failed to fetch {failure_label}: football-data.org returned HTTP {resp.status_code}. "
-                "Verify FOOTBALL_DATA_API_KEY in backend/.env."
-            ),
+            status_code=502,
+            detail=f"football-data error {resp.status_code}: {resp.text[:200]}",
         )
     try:
         return resp.json()
@@ -237,11 +283,30 @@ def api_league_standings(league: str) -> Dict[str, Any]:
 def api_league_predictions(code: str, days: int = Query(default=14, ge=1, le=60)) -> Dict[str, Any]:
     comp_id = _normalize_league_code(code)
     _get_fd_key("predictions")
+    cached = _predictions_cache_get(comp_id, int(days))
+    if cached is not None:
+        return cached
     try:
         standings = fetch_league_standings(comp_id)
         fixtures = fetch_league_fixtures(comp_id, days=days)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch league data: {e}") from e
+    except UpstreamAPIError as e:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": "Upstream API failed",
+                "status": int(e.status) if e.status is not None else 502,
+                "details": e.safe_message,
+            },
+        )
+    except Exception:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": "Upstream API failed",
+                "status": 502,
+                "details": "Unexpected error while fetching league data.",
+            },
+        )
 
     strengths = estimate_team_strengths(standings)
     out = []
@@ -266,11 +331,12 @@ def api_league_predictions(code: str, days: int = Query(default=14, ge=1, le=60)
                 "prediction": pred,
             }
         )
-    return {
+    payload = {
         "league": {"code": comp_id, "name": comp_id, "competition_id": comp_id},
         "days": days,
         "predictions": out,
     }
+    return _predictions_cache_set(comp_id, int(days), payload)
 
 
 def _to_float(x: Any, default: float = 0.0) -> float:

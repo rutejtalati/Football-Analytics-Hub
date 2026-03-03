@@ -1206,6 +1206,7 @@ export default function App() {
       <span className="sortArrow">{arrow(key)}</span>
     </th>
   );
+  const currentYear = new Date().getFullYear();
 
   return (
     <div className="app">
@@ -2125,7 +2126,7 @@ export default function App() {
         ) : null}
       </main>
 
-      <footer className="footer">RUTEJ TALATI (c) 2026</footer>
+      <footer className="footer">&copy; {currentYear} Rutej Talati. All rights reserved.</footer>
     </div>
   );
 }
