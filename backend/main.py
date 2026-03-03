@@ -230,6 +230,40 @@ def _normalize_standings_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return sorted(rows, key=lambda x: x.get("position", 0))
 
 
+def _fetch_standings_payload(league_code: str) -> Dict[str, Any]:
+    api_key = os.getenv("FOOTBALL_DATA_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "FOOTBALL_DATA_API_KEY missing in Render env vars")
+
+    url = f"https://api.football-data.org/v4/competitions/{league_code}/standings"
+    response = requests.get(
+        url,
+        headers={
+            "X-Auth-Token": api_key,
+            "Accept": "application/json",
+            "User-Agent": "FootballAnalyticsHub/1.0",
+        },
+        timeout=(10, 20),
+    )
+
+    print("football-data url:", url)
+    print("api key present:", bool(api_key))
+    print("status:", response.status_code)
+    print("body head:", response.text[:250])
+
+    if response.status_code in (401, 403):
+        raise HTTPException(502, "football-data auth failed (check API key / plan)")
+    if response.status_code == 429:
+        raise HTTPException(503, "football-data rate limited (429)")
+    if response.status_code != 200:
+        raise HTTPException(502, f"football-data error {response.status_code}: {response.text[:250]}")
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise HTTPException(502, "football-data returned invalid JSON") from exc
+
+
 @app.get("/api/league/{league}/fixtures")
 def api_league_fixtures(league: str, days: int = Query(default=14, ge=1, le=60)) -> Dict[str, Any]:
     code = _normalize_league_code(league)
@@ -260,8 +294,7 @@ def api_league_fixtures(league: str, days: int = Query(default=14, ge=1, le=60))
 @app.get("/api/league/{league_code}/table")
 def api_league_table(league_code: str) -> Dict[str, Any]:
     code = _normalize_league_code(league_code)
-    key = _get_fd_key("standings")
-    payload = _fd_get(f"/competitions/{code}/standings", key, "standings")
+    payload = _fetch_standings_payload(code)
     out_rows = _normalize_standings_rows(payload)
     return {
         "league": code,
@@ -274,8 +307,7 @@ def api_league_table(league_code: str) -> Dict[str, Any]:
 @app.get("/api/league/{league}/standings")
 def api_league_standings(league: str) -> Dict[str, Any]:
     code = _normalize_league_code(league)
-    key = _get_fd_key("standings")
-    payload = _fd_get(f"/competitions/{code}/standings", key, "standings")
+    payload = _fetch_standings_payload(code)
     return {"league": code, "standings": _normalize_standings_rows(payload)}
 
 
