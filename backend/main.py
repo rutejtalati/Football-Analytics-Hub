@@ -33,15 +33,14 @@ load_dotenv(dotenv_path=BACKEND_DIR / ".env")
 
 app = FastAPI(title="FPL Predicted Points API", version="2.0.0")
 
-# --- CORS (allow your frontend dev servers) ---
+origins = [
+    "https://rutejtalati.github.io",
+    "https://rutejtalati.github.io/Football-Analytics-Hub",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
