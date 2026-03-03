@@ -4,6 +4,9 @@ import { DndContext, useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import "./styles.css";
 
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+const api = (path) => `${API_BASE}${path}`;
+
 /**
  * IMPORTANT FIXES INCLUDED:
  * 1) GK missing: normalize positions so GK can be "GK" or "GKP" (and also supports FPL element_type=1 if present)
@@ -563,7 +566,7 @@ export default function App() {
   // Fetch players
   useEffect(() => {
     setTableError("");
-    fetch(apiUrl)
+    fetch(api(apiUrl))
       .then(async (res) => {
         if (!res.ok) throw new Error(`API error ${res.status}`);
         return res.json();
@@ -579,7 +582,7 @@ export default function App() {
   }, [apiUrl]);
 
   useEffect(() => {
-    fetch("/api/epl_table")
+    fetch(api("/api/epl_table"))
       .then(async (r) => {
         if (!r.ok) throw new Error(`EPL table API error ${r.status}`);
         return r.json();
@@ -872,7 +875,7 @@ export default function App() {
     const id = parseTeamId(teamId);
     if (id == null) return setSquadError("Enter a valid Team ID (number).");
     try {
-      const res = await fetch(`/api/squad?team_id=${id}`);
+      const res = await fetch(api(`/api/squad?team_id=${id}`));
       if (!res.ok) throw new Error(`Squad API error ${res.status}`);
       const data = await res.json();
       const picks = data.picks || [];
@@ -1082,7 +1085,7 @@ export default function App() {
     setTransferError("");
     setTransferResult(null);
     try {
-      const res = await fetch("/api/transfer_suggestions", {
+      const res = await fetch(api("/api/transfer_suggestions"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1114,8 +1117,8 @@ export default function App() {
     setLeagueTable({ rows: [], loading: true, error: "" });
     try {
       const [fxRes, tblRes] = await Promise.all([
-        fetch(`/api/league/${league.code}/fixtures?days=14`),
-        fetch(`/api/league/${league.code}/standings`),
+        fetch(api(`/api/league/${league.code}/fixtures?days=14`)),
+        fetch(api(`/api/league/${league.code}/standings`)),
       ]);
       if (!fxRes.ok) {
         const text = await fxRes.text().catch(() => "");
@@ -1149,8 +1152,8 @@ export default function App() {
     setLeagueTable({ rows: [], loading: true, error: "" });
     try {
       const [predRes, tblRes] = await Promise.all([
-        fetch(`/api/league/${league.code}/predictions?days=14`),
-        fetch(`/api/league/${league.code}/standings`),
+        fetch(api(`/api/league/${league.code}/predictions?days=14`)),
+        fetch(api(`/api/league/${league.code}/standings`)),
       ]);
       if (!predRes.ok) throw new Error(`Predictions endpoint unavailable (${predRes.status}).`);
       const predData = await predRes.json();
@@ -1180,7 +1183,7 @@ export default function App() {
     setLeagueData({ fixtures: [], predictions: [], table: [], error: "" });
     setLeagueTable({ rows: [], loading: true, error: "" });
     try {
-      const res = await fetch(`/api/league/${league.code}/standings`);
+      const res = await fetch(api(`/api/league/${league.code}/standings`));
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(`Table endpoint unavailable (${res.status}). ${text}`);

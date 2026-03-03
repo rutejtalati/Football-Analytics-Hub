@@ -57,3 +57,7 @@ Notes:
 ## Setup football-data.org token
 - Put your token into `backend/.env` as `FOOTBALL_DATA_API_KEY=...`
 - Restart `uvicorn main:app --reload`
+
+## Frontend API base
+- For production builds of the Vite frontend, set `VITE_API_BASE` (for example in `frontend/.env`) to your backend URL.
+- Example: `VITE_API_BASE=https://football-analytics-backend-x6te.onrender.com`
