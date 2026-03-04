@@ -267,13 +267,14 @@ class APIFootballProvider:
         "SA": "seriea",
         "FL1": "ligue1",
     }
+    BASE_URL = "https://v3.football.api-sports.io"
 
     def __init__(self):
-        self.base_url = "https://v3.football.api-sports.io"
+        self.base_url = self.BASE_URL
         self.timeout_seconds = 6
-        self.api_key = (os.getenv("APIFOOTBALL_API_KEY") or "").strip()
-        self.rapidapi_key = (os.getenv("RAPIDAPI_KEY") or "").strip()
-        self.rapidapi_host = (os.getenv("RAPIDAPI_HOST") or "api-football-v1.p.rapidapi.com").strip()
+        self.api_key = os.getenv("APIFOOTBALL_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("APIFOOTBALL_API_KEY not set in environment variables")
         self.default_season = int(CURRENT_SEASON)
         self.standings_ttl_seconds = 1800
         self.fixtures_ttl_seconds = 600
@@ -286,20 +287,11 @@ class APIFootballProvider:
         return {"league_id": league_id, "season": self.default_season}
 
     def _headers(self) -> Dict[str, str]:
-        if self.api_key:
-            return {
-                "x-apisports-key": self.api_key,
-                "Accept": "application/json",
-                "User-Agent": "FootballAnalyticsHub/1.0",
-            }
-        if self.rapidapi_key and self.rapidapi_host:
-            return {
-                "x-rapidapi-key": self.rapidapi_key,
-                "x-rapidapi-host": self.rapidapi_host,
-                "Accept": "application/json",
-                "User-Agent": "FootballAnalyticsHub/1.0",
-            }
-        return {}
+        return {
+            "x-apisports-key": self.api_key,
+            "Accept": "application/json",
+            "User-Agent": "FootballAnalyticsHub/1.0",
+        }
 
     def _request(self, path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         status_code, payload = self._request_with_status(path, params)
