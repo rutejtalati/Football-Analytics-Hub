@@ -1136,3 +1136,16 @@ def api_best_team(
             "note": "Constrained optimizer with max 3 players per club.",
         },
     }
+
+
+@app.get("/debug/env")
+def debug_environment():
+    key = os.getenv("APIFOOTBALL_API_KEY")
+
+    return {
+        "env_check": "ok",
+        "api_key_loaded": bool(key),
+        "api_key_length": len(key) if key else 0,
+        "environment": os.getenv("RENDER") or "local",
+        "timestamp": datetime.utcnow().isoformat()
+    }
