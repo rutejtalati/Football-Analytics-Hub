@@ -193,8 +193,7 @@ def _provider_error_response(err: ProviderError) -> JSONResponse:
 
 
 def _api_football_headers() -> Dict[str, str]:
-    # Keep env var name for now (requested): FOOTBALL_DATA_API_KEY
-    key = (os.getenv("FOOTBALL_DATA_API_KEY") or "").strip()
+    key = (os.getenv("APIFOOTBALL_API_KEY") or "").strip()
     if not key:
         return {}
     return {
@@ -1148,4 +1147,15 @@ def debug_environment():
         "api_key_length": len(key) if key else 0,
         "environment": os.getenv("RENDER") or "local",
         "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/api/debug/env")
+def debug_env():
+    key = os.getenv("APIFOOTBALL_API_KEY", "")
+    return {
+        "has_key": bool(key),
+        "key_len": len(key),
+        "key_prefix": key[:6],
+        "key_suffix": key[-4:],
     }

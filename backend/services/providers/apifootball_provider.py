@@ -76,6 +76,11 @@ class ApiFootballProvider:
         }
 
     def _request(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        import os
+
+        key = os.getenv("APIFOOTBALL_API_KEY", "")
+        print("APIFOOTBALL_API_KEY present?", bool(key), "len=", len(key))
+
         try:
             response = requests.get(
                 f"{self.BASE_URL}{path}",
