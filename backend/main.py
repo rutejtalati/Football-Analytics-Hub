@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -26,12 +26,7 @@ from model import (
 
 import requests
 from leagues import list_leagues
-from league_client import (
-    UpstreamAPIError,
-    fetch_fixtures as fetch_league_fixtures,
-    fetch_standings as fetch_league_standings,
-)
-from prediction import estimate_team_strengths, predict_fixture
+from services.providers.football_provider import ProviderError, get_provider
 
 BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BACKEND_DIR / ".env")
@@ -40,7 +35,6 @@ app = FastAPI(title="FPL Predicted Points API", version="2.0.0")
 
 origins = [
     "https://rutejtalati.github.io",
-    "https://rutejtalati.github.io/Football-Analytics-Hub",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:4173",
@@ -55,12 +49,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=500,
+        content={"error": f"Internal server error: {str(exc)[:200]}"},
+    )
+
 UNDERSTAT_LEAGUE = os.environ.get("UNDERSTAT_LEAGUE", "EPL")
 UNDERSTAT_SEASON = os.environ.get("UNDERSTAT_SEASON", "2025")
 UNDERSTAT_TTL_SECONDS = int(os.environ.get("UNDERSTAT_TTL_SECONDS", str(24 * 3600)))
 
 FPL_BASE = "https://fantasy.premierleague.com/api"
-FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
 FALLBACK_STANDINGS_PATH = Path(__file__).with_name("standings_fallback.json")
 LEAGUE_CODE_MAP = {
     "PL": "PL",
@@ -72,8 +73,16 @@ LEAGUE_CODE_MAP = {
     "FL1": "FL1",
     "LIGUE1": "FL1",
 }
+API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
+API_FOOTBALL_LEAGUE_IDS = {
+    "PL": 39,   # epl
+    "PD": 140,  # laliga
+    "SA": 135,  # seriea
+    "FL1": 61,  # ligue1
+}
 PREDICTIONS_CACHE_TTL_SECONDS = 600
 _PREDICTIONS_CACHE: Dict[Tuple[str, int], Tuple[float, Dict[str, Any]]] = {}
+football_provider = get_provider()
 
 
 def _predictions_cache_get(code: str, days: int) -> Optional[Dict[str, Any]]:
@@ -121,9 +130,19 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/health")
+def health_root() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/api/leagues")
 def api_leagues() -> Dict[str, Any]:
     return {"leagues": list_leagues()}
+
+
+@app.get("/api/provider")
+def api_provider() -> Dict[str, str]:
+    return {"provider": football_provider.__class__.__name__}
 
 
 def _normalize_league_code(league_code: str) -> str:
@@ -134,235 +153,213 @@ def _normalize_league_code(league_code: str) -> str:
     return code
 
 
-def _get_fd_key(failure_label: str) -> str:
-    key = (os.getenv("FOOTBALL_DATA_API_KEY") or "").strip()
-    if not key:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Failed to fetch {failure_label}: FOOTBALL_DATA_API_KEY is not set. "
-                "Set FOOTBALL_DATA_API_KEY in backend/.env and restart the backend."
-            ),
-        )
-    return key
-
-
-def _fd_get(path: str, key: str, failure_label: str) -> Dict[str, Any]:
-    url = f"{FOOTBALL_DATA_BASE}{path}"
-    try:
-        if "/standings" in path:
-            print("Fetching standings:", url)
-            print("API key present:", bool(key))
-        resp = requests.get(
-            url,
-            headers={
-                "X-Auth-Token": key,
-                "Accept": "application/json",
-            },
-            timeout=(10, 20),
-        )
-        if "/standings" in path:
-            print("Response status:", resp.status_code)
-    except requests.exceptions.Timeout as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="football-data timeout",
-        ) from exc
-    except requests.exceptions.ConnectionError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Network connection failed to football-data.org",
-        ) from exc
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"football-data request error: {str(exc)[:200]}") from exc
-
-    if resp.status_code in {401, 403}:
-        raise HTTPException(status_code=502, detail="Invalid FOOTBALL_DATA_API_KEY")
-    if resp.status_code == 429:
-        raise HTTPException(status_code=503, detail="football-data.org rate limit reached")
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"football-data error {resp.status_code}: {resp.text[:200]}",
-        )
-    try:
-        return resp.json()
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to fetch {failure_label}: football-data.org returned invalid JSON.",
-        ) from exc
-
-
-def _extract_total_standings_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    standings = payload.get("standings", []) or []
-    table_rows: List[Dict[str, Any]] = []
-    for s in standings:
-        if str(s.get("type", "")).upper() == "TOTAL":
-            table_rows = s.get("table", []) or []
-            break
-    if not table_rows and standings:
-        table_rows = standings[0].get("table", []) or []
-    return table_rows
-
-
-def _normalize_standings_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for r in _extract_total_standings_rows(payload):
-        team = r.get("team", {}) or {}
-        goals_for = _to_int(r.get("goalsFor"), 0)
-        goals_against = _to_int(r.get("goalsAgainst"), 0)
-        rows.append(
-            {
-                "position": _to_int(r.get("position"), 0),
-                "teamName": str(team.get("name") or ""),
-                "teamShort": str(team.get("shortName") or team.get("tla") or team.get("name") or ""),
-                "playedGames": _to_int(r.get("playedGames"), 0),
-                "won": _to_int(r.get("won"), 0),
-                "draw": _to_int(r.get("draw"), 0),
-                "lost": _to_int(r.get("lost"), 0),
-                "points": _to_int(r.get("points"), 0),
-                "goalsFor": goals_for,
-                "goalsAgainst": goals_against,
-                "goalDifference": _to_int(r.get("goalDifference"), goals_for - goals_against),
-            }
-        )
-    return sorted(rows, key=lambda x: x.get("position", 0))
-
-
-def _fetch_standings_payload(league_code: str) -> Dict[str, Any]:
-    api_key = os.getenv("FOOTBALL_DATA_API_KEY")
-    if not api_key:
-        raise HTTPException(500, "FOOTBALL_DATA_API_KEY missing in Render env vars")
-
-    url = f"https://api.football-data.org/v4/competitions/{league_code}/standings"
-    response = requests.get(
-        url,
-        headers={
-            "X-Auth-Token": api_key,
-            "Accept": "application/json",
-            "User-Agent": "FootballAnalyticsHub/1.0",
+def _provider_error_response(err: ProviderError) -> JSONResponse:
+    return JSONResponse(
+        status_code=int(err.status_code or 503),
+        content={
+            "error": "Upstream API failed",
+            "status": int(err.upstream_status) if err.upstream_status is not None else int(err.status_code or 503),
+            "details": err.message,
         },
-        timeout=(10, 20),
     )
 
-    print("football-data url:", url)
-    print("api key present:", bool(api_key))
-    print("status:", response.status_code)
-    print("body head:", response.text[:250])
 
-    if response.status_code in (401, 403):
-        raise HTTPException(502, "football-data auth failed (check API key / plan)")
-    if response.status_code == 429:
-        raise HTTPException(503, "football-data rate limited (429)")
-    if response.status_code != 200:
-        raise HTTPException(502, f"football-data error {response.status_code}: {response.text[:250]}")
+def _api_football_headers() -> Dict[str, str]:
+    # Keep env var name for now (requested): FOOTBALL_DATA_API_KEY
+    key = (os.getenv("FOOTBALL_DATA_API_KEY") or "").strip()
+    if not key:
+        return {}
+    return {
+        "x-apisports-key": key,
+        "Accept": "application/json",
+    }
 
+
+def _api_football_get(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    headers = _api_football_headers()
+    if not headers:
+        return None
     try:
-        return response.json()
-    except ValueError as exc:
-        raise HTTPException(502, "football-data returned invalid JSON") from exc
+        res = requests.get(
+            f"{API_FOOTBALL_BASE}{path}",
+            headers=headers,
+            params=params,
+            timeout=6,
+        )
+        if res.status_code != 200:
+            return None
+        return res.json() if res.content else {}
+    except Exception:
+        return None
+
+
+def _parse_matchday(round_text: Any) -> int:
+    try:
+        text = str(round_text or "")
+        tail = text.split("-")[-1].strip()
+        return int(tail) if tail.isdigit() else 0
+    except Exception:
+        return 0
+
+
+def _fetch_league_fixtures_api_football(code: str, days: int) -> List[Dict[str, Any]]:
+    league_id = API_FOOTBALL_LEAGUE_IDS.get(code)
+    if not league_id:
+        return []
+    span = max(1, min(int(days), 60))
+    today = datetime.now(timezone.utc).date()
+    end = today + timedelta(days=span)
+    payload = _api_football_get(
+        "/fixtures",
+        {
+            "league": league_id,
+            "season": 2025,
+            "from": today.isoformat(),
+            "to": end.isoformat(),
+        },
+    )
+    if payload is None:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for item in payload.get("response", []) or []:
+        fixture = item.get("fixture", {}) or {}
+        teams = item.get("teams", {}) or {}
+        home_team = teams.get("home", {}) or {}
+        away_team = teams.get("away", {}) or {}
+        out.append(
+            {
+                "utcDate": fixture.get("date"),
+                "matchday": _parse_matchday((item.get("league", {}) or {}).get("round")),
+                "competition": code,
+                "venue": str((fixture.get("venue") or {}).get("name") or "Home"),
+                "home": str(home_team.get("name") or ""),
+                "away": str(away_team.get("name") or ""),
+                # compatibility fields for predictions builder/provider
+                "match_id": int(fixture.get("id") or 0),
+                "utc_date": fixture.get("date"),
+                "status": str(((fixture.get("status") or {}).get("short")) or ""),
+                "home_team_id": int(home_team.get("id") or 0),
+                "home_team_name": str(home_team.get("name") or ""),
+                "away_team_id": int(away_team.get("id") or 0),
+                "away_team_name": str(away_team.get("name") or ""),
+            }
+        )
+    out.sort(key=lambda x: str(x.get("utcDate") or ""))
+    return out
+
+
+def _fetch_league_standings_api_football(code: str) -> List[Dict[str, Any]]:
+    league_id = API_FOOTBALL_LEAGUE_IDS.get(code)
+    if not league_id:
+        return []
+    payload = _api_football_get(
+        "/standings",
+        {
+            "league": league_id,
+            "season": 2025,
+        },
+    )
+    if payload is None:
+        return []
+    resp_rows = payload.get("response", []) or []
+    if not resp_rows:
+        return []
+    league_info = resp_rows[0].get("league", {}) or {}
+    groups = league_info.get("standings", []) or []
+    if not groups:
+        return []
+    table_rows = groups[0] or []
+    out: List[Dict[str, Any]] = []
+    for row in table_rows:
+        team = row.get("team", {}) or {}
+        all_stats = row.get("all", {}) or {}
+        goals = all_stats.get("goals", {}) or {}
+        gf = _to_int(goals.get("for"), 0)
+        ga = _to_int(goals.get("against"), 0)
+        out.append(
+            {
+                "position": _to_int(row.get("rank"), 0),
+                "teamName": str(team.get("name") or ""),
+                "teamShort": str(team.get("code") or team.get("name") or ""),
+                "playedGames": _to_int(all_stats.get("played"), 0),
+                "won": _to_int(all_stats.get("win"), 0),
+                "draw": _to_int(all_stats.get("draw"), 0),
+                "lost": _to_int(all_stats.get("lose"), 0),
+                "points": _to_int(row.get("points"), 0),
+                "goalsFor": gf,
+                "goalsAgainst": ga,
+                "goalDifference": _to_int(row.get("goalsDiff"), gf - ga),
+                "team": str(team.get("name") or ""),
+            }
+        )
+    out.sort(key=lambda x: _to_int(x.get("position"), 0))
+    return out
 
 
 @app.get("/api/league/{league}/fixtures")
 def api_league_fixtures(league: str, days: int = Query(default=14, ge=1, le=60)) -> Dict[str, Any]:
     code = _normalize_league_code(league)
-    key = _get_fd_key("fixtures")
-    today = datetime.now(timezone.utc).date()
-    end = today + timedelta(days=int(days))
-    payload = _fd_get(
-        f"/competitions/{code}/matches?dateFrom={today.isoformat()}&dateTo={end.isoformat()}",
-        key,
-        "fixtures",
-    )
-    fixtures: List[Dict[str, Any]] = []
-    for match in payload.get("matches", []) or []:
-        fixtures.append(
+    try:
+        fixtures = football_provider.get_fixtures(code, int(days))
+        slim = [
             {
-                "utcDate": match.get("utcDate"),
-                "matchday": _to_int(match.get("matchday"), 0),
+                "utcDate": fx.get("utcDate"),
+                "matchday": _to_int(fx.get("matchday"), 0),
                 "competition": code,
-                "venue": (match.get("venue") or "Home"),
-                "home": str((match.get("homeTeam") or {}).get("name") or ""),
-                "away": str((match.get("awayTeam") or {}).get("name") or ""),
+                "venue": fx.get("venue") or "Home",
+                "home": str(fx.get("home") or fx.get("home_team_name") or ""),
+                "away": str(fx.get("away") or fx.get("away_team_name") or ""),
             }
-        )
-    fixtures.sort(key=lambda x: str(x.get("utcDate") or ""))
-    return {"league": code, "fixtures": fixtures}
+            for fx in fixtures
+        ]
+        return {"league": code, "fixtures": slim}
+    except ProviderError as err:
+        return _provider_error_response(err)
+    except Exception as err:
+        return JSONResponse(status_code=500, content={"error": f"Failed to fetch fixtures: {str(err)[:200]}"})
 
 
 @app.get("/api/league/{league_code}/table")
 def api_league_table(league_code: str) -> Dict[str, Any]:
     code = _normalize_league_code(league_code)
-    payload = _fetch_standings_payload(code)
-    out_rows = _normalize_standings_rows(payload)
-    return {
-        "league": code,
-        "updated": datetime.now(timezone.utc).isoformat(),
-        "table": out_rows,
-        "source": "football-data.org",
-    }
+    try:
+        out_rows = football_provider.get_standings(code)
+        return {
+            "league": code,
+            "updated": datetime.now(timezone.utc).isoformat(),
+            "table": out_rows,
+            "source": "provider",
+        }
+    except ProviderError as err:
+        return _provider_error_response(err)
+    except Exception as err:
+        return JSONResponse(status_code=500, content={"error": f"Failed to fetch table: {str(err)[:200]}"})
 
 
 @app.get("/api/league/{league}/standings")
 def api_league_standings(league: str) -> Dict[str, Any]:
     code = _normalize_league_code(league)
-    payload = _fetch_standings_payload(code)
-    return {"league": code, "standings": _normalize_standings_rows(payload)}
+    try:
+        return {"league": code, "standings": football_provider.get_standings(code)}
+    except ProviderError as err:
+        return _provider_error_response(err)
+    except Exception as err:
+        return JSONResponse(status_code=500, content={"error": f"Failed to fetch standings: {str(err)[:200]}"})
 
 
 @app.get("/api/league/{code}/predictions")
 def api_league_predictions(code: str, days: int = Query(default=14, ge=1, le=60)) -> Dict[str, Any]:
     comp_id = _normalize_league_code(code)
-    _get_fd_key("predictions")
     cached = _predictions_cache_get(comp_id, int(days))
     if cached is not None:
         return cached
     try:
-        standings = fetch_league_standings(comp_id)
-        fixtures = fetch_league_fixtures(comp_id, days=days)
-    except UpstreamAPIError as e:
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": "Upstream API failed",
-                "status": int(e.status) if e.status is not None else 502,
-                "details": e.safe_message,
-            },
-        )
-    except Exception:
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": "Upstream API failed",
-                "status": 502,
-                "details": "Unexpected error while fetching league data.",
-            },
-        )
-
-    strengths = estimate_team_strengths(standings)
-    out = []
-    for fx in fixtures:
-        home_id = _to_int(fx.get("home_team_id"))
-        away_id = _to_int(fx.get("away_team_id"))
-        pred = predict_fixture(home_id, away_id, strengths)
-        # TODO: remove lambda_* once frontend is updated.
-        if "xgH" in pred and "lambda_h" not in pred:
-            pred["lambda_h"] = pred["xgH"]
-        if "xgA" in pred and "lambda_a" not in pred:
-            pred["lambda_a"] = pred["xgA"]
-        out.append(
-            {
-                "match_id": fx.get("match_id"),
-                "utc_date": fx.get("utc_date"),
-                "status": fx.get("status"),
-                "home_team_id": home_id,
-                "home_team_name": fx.get("home_team_name"),
-                "away_team_id": away_id,
-                "away_team_name": fx.get("away_team_name"),
-                "prediction": pred,
-            }
-        )
+        out = football_provider.get_predictions(comp_id, int(days))
+    except ProviderError as err:
+        return _provider_error_response(err)
+    except Exception as err:
+        return JSONResponse(status_code=500, content={"error": f"Failed to fetch predictions: {str(err)[:200]}"})
     payload = {
         "league": {"code": comp_id, "name": comp_id, "competition_id": comp_id},
         "days": days,
@@ -848,7 +845,6 @@ def _read_fallback_ranks() -> Dict[str, int]:
 
 @app.get("/api/epl_table")
 def api_epl_table() -> Dict[str, Any]:
-    key = os.environ.get("FOOTBALL_DATA_API_KEY", "").strip()
     name_map = _bootstrap_name_to_code()
     fallback = {
         "season": "fallback",
@@ -856,36 +852,28 @@ def api_epl_table() -> Dict[str, Any]:
         "source": "fallback",
         "ranks": _read_fallback_ranks(),
     }
-    if key:
-        try:
-            resp = requests.get(
-                f"{FOOTBALL_DATA_BASE}/competitions/PL/standings",
-                headers={"X-Auth-Token": key},
-                timeout=20,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            standings = data.get("standings", [])
-            table = standings[0].get("table", []) if standings else []
-            ranks: Dict[str, int] = {}
-            for row in table:
-                team_name = _norm_team_name(str(row.get("team", {}).get("name", "")))
-                code = name_map.get(team_name)
-                if not code:
-                    continue
-                ranks[code] = _to_int(row.get("position"))
-            if ranks:
-                return {
-                    "season": str(data.get("season", {}).get("id", "live")),
-                    "updated": datetime.now(timezone.utc).isoformat(),
-                    "source": "football-data.org",
-                    "ranks": ranks,
-                }
-        except Exception as e:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            short = f"football-data request failed: {status}" if status is not None else "football-data request failed"
-            fallback["error"] = short
-            return fallback
+    try:
+        table_rows = football_provider.get_standings("PL")
+        ranks: Dict[str, int] = {}
+        for row in table_rows:
+            team_name = _norm_team_name(str(row.get("teamName") or row.get("team") or ""))
+            code = name_map.get(team_name)
+            if not code:
+                continue
+            ranks[code] = _to_int(row.get("position"))
+        if ranks:
+            return {
+                "season": "live",
+                "updated": datetime.now(timezone.utc).isoformat(),
+                "source": "provider",
+                "ranks": ranks,
+            }
+    except ProviderError as err:
+        fallback["error"] = err.message
+        return fallback
+    except Exception as err:
+        fallback["error"] = f"unexpected error: {str(err)[:200]}"
+        return fallback
 
     return fallback
 

@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+LEAGUE_IDS: Dict[str, int] = {
+    "epl": 39,
+    "laliga": 140,
+    "seriea": 135,
+    "ligue1": 61,
+}
+
+CURRENT_SEASON = 2025
+
 SUPPORTED_LEAGUES: Dict[str, Dict[str, str]] = {
     "EPL": {"name": "Premier League", "competition_id": "PL"},
     "LALIGA": {"name": "La Liga", "competition_id": "PD"},

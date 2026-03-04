@@ -7,15 +7,15 @@ uvicorn main:app --reload
 ```
 
 ## Environment
-Set football-data.org key for multi-league endpoints:
+Set API-Football key for multi-league endpoints:
 
 ```bash
-export FOOTBALL_DATA_API_KEY="db789c47e9e94ceeb9b5e256934fc723"
+export APIFOOTBALL_API_KEY="your_api_football_key"
 ```
 
 Windows PowerShell:
 ```powershell
-$env:FOOTBALL_DATA_API_KEY="db789c47e9e94ceeb9b5e256934fc723"
+$env:APIFOOTBALL_API_KEY="your_api_football_key"
 ```
 
 ## Existing FPL endpoints
@@ -50,12 +50,12 @@ Notes:
 - Multi-league routes use in-memory TTL caching to reduce API calls.
 
 ## EPL table live key
-- Create `backend/.env` and set: `FOOTBALL_DATA_API_KEY=PASTE_YOUR_FOOTBALL_DATA_TOKEN_HERE`
-- `/api/epl_table` uses `X-Auth-Token` against `/v4/competitions/PL/standings`.
-- If key is missing or request fails, fallback standings are returned; free tier is rate-limited.
+- Create `backend/.env` and set: `APIFOOTBALL_API_KEY=YOUR_API_FOOTBALL_KEY`
+- `/api/epl_table` uses the configured provider key.
+- If key is missing or request fails, fallback standings are returned.
 
-## Setup football-data.org token
-- Put your token into `backend/.env` as `FOOTBALL_DATA_API_KEY=...`
+## Setup API-Football token
+- Put your token into `backend/.env` as `APIFOOTBALL_API_KEY=...`
 - Restart `uvicorn main:app --reload`
 
 ## Frontend API base
