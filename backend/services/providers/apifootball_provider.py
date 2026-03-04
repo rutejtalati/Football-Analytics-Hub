@@ -56,13 +56,18 @@ class ApiFootballProvider:
         return league_id
 
     def _headers(self) -> Dict[str, str]:
-        key = self._api_key()
+        import os
 
-        # Debug log to confirm API key is loaded in Render
-        try:
-            print("API KEY LOADED:", bool(key))
-        except Exception:
-            pass
+        key = (os.getenv("APIFOOTBALL_API_KEY") or "").strip()
+
+        # DEBUG LOGS (temporary)
+        print("===== API FOOTBALL DEBUG =====")
+        print("API KEY LOADED:", bool(key))
+        print("API KEY LENGTH:", len(key))
+        if key:
+            print("API KEY PREFIX:", key[:4])
+            print("API KEY SUFFIX:", key[-4:])
+        print("===============================")
 
         return {
             "x-apisports-key": key,
