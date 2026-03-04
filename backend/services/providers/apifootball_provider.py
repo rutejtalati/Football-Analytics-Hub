@@ -56,8 +56,16 @@ class ApiFootballProvider:
         return league_id
 
     def _headers(self) -> Dict[str, str]:
+        key = self._api_key()
+
+        # Debug log to confirm API key is loaded in Render
+        try:
+            print("API KEY LOADED:", bool(key))
+        except Exception:
+            pass
+
         return {
-            "x-apisports-key": self._api_key(),
+            "x-apisports-key": key,
             "Accept": "application/json",
             "User-Agent": "FootballAnalyticsHub/1.0",
         }
