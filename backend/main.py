@@ -195,7 +195,7 @@ def _provider_error_response(err: ProviderError) -> JSONResponse:
 def _api_football_headers() -> Dict[str, str]:
     key = (os.getenv("APIFOOTBALL_API_KEY") or "").strip()
     if not key:
-        return {}
+        raise RuntimeError("APIFOOTBALL_API_KEY environment variable not set")
     return {
         "x-apisports-key": key,
         "Accept": "application/json",
@@ -204,14 +204,15 @@ def _api_football_headers() -> Dict[str, str]:
 
 def _api_football_get(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     headers = _api_football_headers()
-    if not headers:
-        return None
+    url = f"{API_FOOTBALL_BASE}{path}"
+    print("Calling API-Football:", url)
+    print("Params:", params)
     try:
         res = requests.get(
-            f"{API_FOOTBALL_BASE}{path}",
+            url,
             headers=headers,
             params=params,
-            timeout=6,
+            timeout=10,
         )
         if res.status_code != 200:
             return None

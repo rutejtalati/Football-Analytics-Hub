@@ -25,6 +25,7 @@ class ApiFootballProvider:
     }
 
     def __init__(self):
+        self.api_key = self._api_key()
         self.season = self._configured_or_inferred_season()
         self.standings_ttl_seconds = 1800
         self.fixtures_ttl_seconds = 600
@@ -56,35 +57,21 @@ class ApiFootballProvider:
         return league_id
 
     def _headers(self) -> Dict[str, str]:
-        import os
-
-        key = (os.getenv("APIFOOTBALL_API_KEY") or "").strip()
-
-        # DEBUG LOGS (temporary)
-        print("===== API FOOTBALL DEBUG =====")
-        print("API KEY LOADED:", bool(key))
-        print("API KEY LENGTH:", len(key))
-        if key:
-            print("API KEY PREFIX:", key[:4])
-            print("API KEY SUFFIX:", key[-4:])
-        print("===============================")
-
         return {
-            "x-apisports-key": key,
+            "x-apisports-key": self.api_key,
             "Accept": "application/json",
-            "User-Agent": "FootballAnalyticsHub/1.0",
         }
 
     def _request(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        import os
-
-        key = os.getenv("APIFOOTBALL_API_KEY", "")
-        print("APIFOOTBALL_API_KEY present?", bool(key), "len=", len(key))
+        url = f"{self.BASE_URL}{path}"
+        headers = self._headers()
+        print("Calling API-Football:", url)
+        print("Params:", params)
 
         try:
             response = requests.get(
-                f"{self.BASE_URL}{path}",
-                headers=self._headers(),
+                url,
+                headers=headers,
                 params=params,
                 timeout=self.timeout_seconds,
             )

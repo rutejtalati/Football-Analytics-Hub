@@ -271,7 +271,7 @@ class APIFootballProvider:
 
     def __init__(self):
         self.base_url = self.BASE_URL
-        self.timeout_seconds = 6
+        self.timeout_seconds = 10
         self.api_key = os.getenv("APIFOOTBALL_API_KEY")
         if not self.api_key:
             raise RuntimeError("APIFOOTBALL_API_KEY not set in environment variables")
@@ -303,9 +303,12 @@ class APIFootballProvider:
         headers = self._headers()
         if not headers:
             return None, None
+        url = f"{self.base_url}{path}"
+        print("Calling API-Football:", url)
+        print("Params:", params)
         try:
             response = requests.get(
-                f"{self.base_url}{path}",
+                url,
                 headers=headers,
                 params=params,
                 timeout=self.timeout_seconds,
