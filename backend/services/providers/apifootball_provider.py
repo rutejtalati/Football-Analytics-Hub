@@ -25,7 +25,9 @@ class ApiFootballProvider:
     }
 
     def __init__(self):
-        self.api_key = self._api_key()
+        self.api_key = os.getenv("APIFOOTBALL_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("APIFOOTBALL_API_KEY environment variable not set")
         self.season = self._configured_or_inferred_season()
         self.standings_ttl_seconds = 1800
         self.fixtures_ttl_seconds = 600
@@ -45,9 +47,9 @@ class ApiFootballProvider:
         self._logger = logging.getLogger(__name__)
 
     def _api_key(self) -> str:
-        key = (os.getenv("APIFOOTBALL_API_KEY") or "").strip()
+        key = (self.api_key or "").strip()
         if not key:
-            raise ProviderError("APIFOOTBALL_API_KEY missing in environment.", status_code=503)
+            raise RuntimeError("APIFOOTBALL_API_KEY environment variable not set")
         return key
 
     def _league_id(self, code: str) -> int:
