@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from cachetools import TTLCache
 
 from services.providers.football_provider import ProviderError
 
@@ -27,19 +28,25 @@ class ApiFootballProvider:
         self.season = self._configured_or_inferred_season()
         self.standings_ttl_seconds = 1800
         self.fixtures_ttl_seconds = 600
-        self.predictions_ttl_seconds = 600
+        self.predictions_ttl_seconds = int(os.getenv("APIFOOTBALL_PREDICTIONS_TTL_SECONDS", "3600"))
+        self.predictions_cache_size = int(os.getenv("APIFOOTBALL_PREDICTIONS_CACHE_SIZE", "100"))
         self.home_adv = float(os.getenv("HOME_ADV", "1.10"))
         self.max_goals = int(os.getenv("POISSON_MAX_GOALS", "6"))
+        self.timeout_seconds = float(os.getenv("APIFOOTBALL_TIMEOUT_SECONDS", "10"))
         self._standings_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
         self._fixtures_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
-        self._predictions_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
+        self._predictions_cache: TTLCache[str, List[Dict[str, Any]]] = TTLCache(
+            maxsize=self.predictions_cache_size,
+            ttl=self.predictions_ttl_seconds,
+        )
+        self._predictions_stale: Dict[str, List[Dict[str, Any]]] = {}
         self._cache_lock = threading.Lock()
         self._logger = logging.getLogger(__name__)
 
     def _api_key(self) -> str:
-        key = (os.getenv("APIFOOTBALL_API_KEY") or os.getenv("FOOTBALL_DATA_API_KEY") or "").strip()
+        key = (os.getenv("APIFOOTBALL_API_KEY") or "").strip()
         if not key:
-            raise ProviderError("APIFOOTBALL_API_KEY (or FOOTBALL_DATA_API_KEY) is not set.", status_code=503)
+            raise ProviderError("APIFOOTBALL_API_KEY missing in environment.", status_code=503)
         return key
 
     def _league_id(self, code: str) -> int:
@@ -61,7 +68,7 @@ class ApiFootballProvider:
                 f"{self.BASE_URL}{path}",
                 headers=self._headers(),
                 params=params,
-                timeout=6,
+                timeout=self.timeout_seconds,
             )
         except requests.exceptions.Timeout as exc:
             raise ProviderError("API-Football timeout", status_code=503, upstream_status=504) from exc
@@ -69,6 +76,8 @@ class ApiFootballProvider:
             raise ProviderError(f"API-Football request failed: {str(exc)[:200]}", status_code=503) from exc
 
         if response.status_code != 200:
+            if response.status_code == 429:
+                raise ProviderError("API-Football rate limited (429)", status_code=503, upstream_status=429)
             raise ProviderError(
                 f"API-Football error {response.status_code}: {response.text[:200]}",
                 status_code=503,
@@ -147,6 +156,20 @@ class ApiFootballProvider:
 
     def _predictions_cache_key(self, code: str, days: int) -> str:
         return f"{code}:{days}"
+
+    def _pred_cache_get(self, key: str) -> Optional[List[Dict[str, Any]]]:
+        with self._cache_lock:
+            return self._predictions_cache.get(key)
+
+    def _pred_cache_get_stale(self, key: str) -> Optional[List[Dict[str, Any]]]:
+        with self._cache_lock:
+            return self._predictions_stale.get(key)
+
+    def _pred_cache_set(self, key: str, payload: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        with self._cache_lock:
+            self._predictions_cache[key] = payload
+            self._predictions_stale[key] = payload
+        return payload
 
     def _fetch_standings_rows(self, code: str, season: int) -> List[Dict[str, Any]]:
         cache_key = self._standings_cache_key(code, season)
@@ -467,138 +490,150 @@ class ApiFootballProvider:
     def get_predictions(self, code: str, days: int = 14) -> List[Dict[str, Any]]:
         span = max(1, min(int(days), 60))
         cache_key = self._predictions_cache_key(code, span)
-        cached = self._cache_get(self._predictions_cache, cache_key)
+        cached = self._pred_cache_get(cache_key)
         if cached is not None:
             return cached
+        try:
+            fixtures = self.get_fixtures(code, span)
+            if not fixtures:
+                self._logger.warning("Predictions skipped: no fixtures for code=%s days=%s", code, span)
+                return self._pred_cache_set(cache_key, [])
 
-        fixtures = self.get_fixtures(code, span)
-        if not fixtures:
-            self._logger.warning("Predictions skipped: no fixtures for code=%s days=%s", code, span)
-            return self._cache_set(self._predictions_cache, cache_key, [], self.predictions_ttl_seconds)
+            standings = self.get_standings(code)
+            team_stats_by_id: Dict[int, Dict[str, float]] = {}
+            team_stats_by_name: Dict[str, Dict[str, float]] = {}
+            ga_values: List[float] = []
+            for row in standings:
+                team_name = str(row.get("teamName") or row.get("team") or "").strip()
+                team_id = int(row.get("team_id") or 0)
+                played = float(row.get("playedGames") or 0.0)
+                if not team_name or played <= 0:
+                    continue
+                gfpg = float(row.get("goalsFor") or 0.0) / played
+                gapg = float(row.get("goalsAgainst") or 0.0) / played
+                stats = {"GFpg": gfpg, "GApg": gapg}
+                team_stats_by_name[team_name.lower()] = stats
+                if team_id > 0:
+                    team_stats_by_id[team_id] = stats
+                ga_values.append(gapg)
 
-        standings = self.get_standings(code)
-        team_stats_by_id: Dict[int, Dict[str, float]] = {}
-        team_stats_by_name: Dict[str, Dict[str, float]] = {}
-        ga_values: List[float] = []
-        for row in standings:
-            team_name = str(row.get("teamName") or row.get("team") or "").strip()
-            team_id = int(row.get("team_id") or 0)
-            played = float(row.get("playedGames") or 0.0)
-            if not team_name or played <= 0:
-                continue
-            gfpg = float(row.get("goalsFor") or 0.0) / played
-            gapg = float(row.get("goalsAgainst") or 0.0) / played
-            stats = {"GFpg": gfpg, "GApg": gapg}
-            team_stats_by_name[team_name.lower()] = stats
-            if team_id > 0:
-                team_stats_by_id[team_id] = stats
-            ga_values.append(gapg)
+            if not ga_values:
+                self._logger.warning("Predictions skipped: missing standings goals data for code=%s", code)
+                return self._pred_cache_set(cache_key, [])
 
-        if not ga_values:
-            self._logger.warning("Predictions skipped: missing standings goals data for code=%s", code)
-            return self._cache_set(self._predictions_cache, cache_key, [], self.predictions_ttl_seconds)
+            league_gapg = sum(ga_values) / float(len(ga_values))
+            if league_gapg <= 0:
+                self._logger.warning("Predictions skipped: league_GApg invalid for code=%s", code)
+                return self._pred_cache_set(cache_key, [])
 
-        league_gapg = sum(ga_values) / float(len(ga_values))
-        if league_gapg <= 0:
-            self._logger.warning("Predictions skipped: league_GApg invalid for code=%s", code)
-            return self._cache_set(self._predictions_cache, cache_key, [], self.predictions_ttl_seconds)
-
-        # Fallback prevents empty predictions when a team name/id mapping is missing.
-        avg_gfpg = sum((v["GFpg"] for v in (team_stats_by_id.values() or team_stats_by_name.values())), 0.0) / max(
-            1, len(team_stats_by_id) or len(team_stats_by_name)
-        )
-        avg_stats = {"GFpg": avg_gfpg, "GApg": league_gapg}
-
-        max_goals = max(1, self.max_goals)
-        out: List[Dict[str, Any]] = []
-        for fx in fixtures:
-            home = str(fx.get("home_team") or fx.get("home") or "").strip()
-            away = str(fx.get("away_team") or fx.get("away") or "").strip()
-            home_id = int(fx.get("home_team_id") or 0)
-            away_id = int(fx.get("away_team_id") or 0)
-            hs = team_stats_by_id.get(home_id) or team_stats_by_name.get(home.lower()) or avg_stats
-            aw = team_stats_by_id.get(away_id) or team_stats_by_name.get(away.lower()) or avg_stats
-            if not home or not away:
-                continue
-
-            xg_home = self.home_adv * hs["GFpg"] * aw["GApg"] / max(league_gapg, 0.01)
-            xg_away = aw["GFpg"] * hs["GApg"] / max(league_gapg, 0.01)
-            xg_home = max(0.05, min(5.0, xg_home))
-            xg_away = max(0.05, min(5.0, xg_away))
-
-            p_home = 0.0
-            p_draw = 0.0
-            p_away = 0.0
-            p_over_25 = 0.0
-            p_btts = 0.0
-            p_home_cs = 0.0
-            p_away_cs = 0.0
-            score_probs: List[Tuple[int, int, float]] = []
-            for i in range(max_goals + 1):
-                pi = self._poisson_pmf(xg_home, i)
-                for j in range(max_goals + 1):
-                    p = pi * self._poisson_pmf(xg_away, j)
-                    score_probs.append((i, j, p))
-                    if i > j:
-                        p_home += p
-                    elif i == j:
-                        p_draw += p
-                    else:
-                        p_away += p
-                    if i + j >= 3:
-                        p_over_25 += p
-                    if i >= 1 and j >= 1:
-                        p_btts += p
-                    if j == 0:
-                        p_home_cs += p
-                    if i == 0:
-                        p_away_cs += p
-
-            total_prob = p_home + p_draw + p_away
-            if total_prob > 0:
-                p_home /= total_prob
-                p_draw /= total_prob
-                p_away /= total_prob
-                p_over_25 /= total_prob
-                p_btts /= total_prob
-                p_home_cs /= total_prob
-                p_away_cs /= total_prob
-
-            score_probs.sort(key=lambda t: t[2], reverse=True)
-            most_likely = f"{score_probs[0][0]}-{score_probs[0][1]}" if score_probs else "0-0"
-            top3 = [{"score": f"{i}-{j}", "p": round(float(p), 6)} for i, j, p in score_probs[:3]]
-
-            out.append(
-                {
-                    "utcDate": fx.get("kickoff") or fx.get("utcDate"),
-                    "matchday": int(fx.get("matchday") or 0),
-                    "home": home,
-                    "away": away,
-                    "venue": fx.get("venue") or "Home",
-                    "xg_home": round(float(xg_home), 4),
-                    "xg_away": round(float(xg_away), 4),
-                    "home_win": float(p_home),
-                    "draw": float(p_draw),
-                    "away_win": float(p_away),
-                    "over_2_5": float(p_over_25),
-                    "btts": float(p_btts),
-                    "home_cs": float(p_home_cs),
-                    "away_cs": float(p_away_cs),
-                    "most_likely_score": most_likely,
-                    "top_scorelines": top3,
-                    "model": "poisson_v1",
-                    # compatibility aliases
-                    "p_home": float(p_home),
-                    "p_draw": float(p_draw),
-                    "p_away": float(p_away),
-                    "score_mode": most_likely,
-                    "over25": float(p_over_25),
-                    "home_win_prob": float(p_home),
-                    "draw_prob": float(p_draw),
-                    "away_win_prob": float(p_away),
-                    "over25_prob": float(p_over_25),
-                }
+            # Fallback prevents empty predictions when a team name/id mapping is missing.
+            avg_gfpg = sum((v["GFpg"] for v in (team_stats_by_id.values() or team_stats_by_name.values())), 0.0) / max(
+                1, len(team_stats_by_id) or len(team_stats_by_name)
             )
+            avg_stats = {"GFpg": avg_gfpg, "GApg": league_gapg}
 
-        out.sort(key=lambda r: str(r.get("utcDate") or ""))
-        return self._cache_set(self._predictions_cache, cache_key, out, self.predictions_ttl_seconds)
+            max_goals = max(1, self.max_goals)
+            out: List[Dict[str, Any]] = []
+            for fx in fixtures:
+                home = str(fx.get("home_team") or fx.get("home") or "").strip()
+                away = str(fx.get("away_team") or fx.get("away") or "").strip()
+                home_id = int(fx.get("home_team_id") or 0)
+                away_id = int(fx.get("away_team_id") or 0)
+                hs = team_stats_by_id.get(home_id) or team_stats_by_name.get(home.lower()) or avg_stats
+                aw = team_stats_by_id.get(away_id) or team_stats_by_name.get(away.lower()) or avg_stats
+                if not home or not away:
+                    continue
+
+                xg_home = self.home_adv * hs["GFpg"] * aw["GApg"] / max(league_gapg, 0.01)
+                xg_away = aw["GFpg"] * hs["GApg"] / max(league_gapg, 0.01)
+                xg_home = max(0.05, min(5.0, xg_home))
+                xg_away = max(0.05, min(5.0, xg_away))
+
+                p_home = 0.0
+                p_draw = 0.0
+                p_away = 0.0
+                p_over_25 = 0.0
+                p_btts = 0.0
+                p_home_cs = 0.0
+                p_away_cs = 0.0
+                score_probs: List[Tuple[int, int, float]] = []
+                for i in range(max_goals + 1):
+                    pi = self._poisson_pmf(xg_home, i)
+                    for j in range(max_goals + 1):
+                        p = pi * self._poisson_pmf(xg_away, j)
+                        score_probs.append((i, j, p))
+                        if i > j:
+                            p_home += p
+                        elif i == j:
+                            p_draw += p
+                        else:
+                            p_away += p
+                        if i + j >= 3:
+                            p_over_25 += p
+                        if i >= 1 and j >= 1:
+                            p_btts += p
+                        if j == 0:
+                            p_home_cs += p
+                        if i == 0:
+                            p_away_cs += p
+
+                total_prob = p_home + p_draw + p_away
+                if total_prob > 0:
+                    p_home /= total_prob
+                    p_draw /= total_prob
+                    p_away /= total_prob
+                    p_over_25 /= total_prob
+                    p_btts /= total_prob
+                    p_home_cs /= total_prob
+                    p_away_cs /= total_prob
+
+                score_probs.sort(key=lambda t: t[2], reverse=True)
+                most_likely = f"{score_probs[0][0]}-{score_probs[0][1]}" if score_probs else "0-0"
+                top3 = [{"score": f"{i}-{j}", "p": round(float(p), 6)} for i, j, p in score_probs[:3]]
+
+                out.append(
+                    {
+                        "utcDate": fx.get("kickoff") or fx.get("utcDate"),
+                        "matchday": int(fx.get("matchday") or 0),
+                        "home": home,
+                        "away": away,
+                        "venue": fx.get("venue") or "Home",
+                        "xg_home": round(float(xg_home), 4),
+                        "xg_away": round(float(xg_away), 4),
+                        "home_win": float(p_home),
+                        "draw": float(p_draw),
+                        "away_win": float(p_away),
+                        "over_2_5": float(p_over_25),
+                        "btts": float(p_btts),
+                        "home_cs": float(p_home_cs),
+                        "away_cs": float(p_away_cs),
+                        "most_likely_score": most_likely,
+                        "top_scorelines": top3,
+                        "model": "poisson_v1",
+                        # compatibility aliases
+                        "p_home": float(p_home),
+                        "p_draw": float(p_draw),
+                        "p_away": float(p_away),
+                        "score_mode": most_likely,
+                        "over25": float(p_over_25),
+                        "home_win_prob": float(p_home),
+                        "draw_prob": float(p_draw),
+                        "away_win_prob": float(p_away),
+                        "over25_prob": float(p_over_25),
+                    }
+                )
+
+            out.sort(key=lambda r: str(r.get("utcDate") or ""))
+            return self._pred_cache_set(cache_key, out)
+        except ProviderError:
+            stale = self._pred_cache_get_stale(cache_key)
+            if stale is not None:
+                self._logger.warning("Serving stale predictions cache for key=%s", cache_key)
+                return stale
+            raise
+        except Exception as exc:
+            stale = self._pred_cache_get_stale(cache_key)
+            if stale is not None:
+                self._logger.warning("Serving stale predictions cache after error for key=%s", cache_key)
+                return stale
+            raise ProviderError(f"Predictions generation failed: {str(exc)[:200]}", status_code=503) from exc
