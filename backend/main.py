@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,12 +35,21 @@ load_dotenv(dotenv_path=BACKEND_DIR / ".env")
 app = FastAPI(title="FPL Predicted Points API", version="2.0.0")
 
 origins = [
+    "http://localhost",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
     "https://rutejtalati.github.io",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:4173",
     "http://127.0.0.1:4173",
 ]
+
+WIDGET_ALLOWED_ORIGINS = {
+    x.strip().rstrip("/")
+    for x in os.getenv("WIDGET_ALLOWED_ORIGINS", "https://rutejtalati.github.io").split(",")
+    if x.strip()
+}
 
 app.add_middleware(
     CORSMiddleware,
@@ -143,6 +153,24 @@ def api_leagues() -> Dict[str, Any]:
 @app.get("/api/provider")
 def api_provider() -> Dict[str, str]:
     return {"provider": football_provider.__class__.__name__}
+
+
+def _normalize_origin(value: str) -> str:
+    parsed = urlparse((value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+@app.get("/api/widget_key")
+def api_widget_key(request: Request) -> Dict[str, str]:
+    origin = _normalize_origin(request.headers.get("origin", ""))
+    if not origin or origin not in WIDGET_ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="Origin not allowed for widget key.")
+    key = (os.getenv("APIFOOTBALL_API_KEY") or os.getenv("FOOTBALL_DATA_API_KEY") or "").strip()
+    if not key:
+        raise HTTPException(status_code=503, detail="Widget key is not configured.")
+    return {"key": key}
 
 
 def _normalize_league_code(league_code: str) -> str:
@@ -304,12 +332,17 @@ def api_league_fixtures(league: str, days: int = Query(default=14, ge=1, le=60))
         fixtures = football_provider.get_fixtures(code, int(days))
         slim = [
             {
-                "utcDate": fx.get("utcDate"),
+                "id": _to_int(fx.get("id"), 0),
+                "kickoff": fx.get("kickoff") or fx.get("utcDate"),
                 "matchday": _to_int(fx.get("matchday"), 0),
+                "home_team": str(fx.get("home_team") or fx.get("home") or fx.get("home_team_name") or ""),
+                "away_team": str(fx.get("away_team") or fx.get("away") or fx.get("away_team_name") or ""),
                 "competition": code,
                 "venue": fx.get("venue") or "Home",
                 "home": str(fx.get("home") or fx.get("home_team_name") or ""),
                 "away": str(fx.get("away") or fx.get("away_team_name") or ""),
+                "status": str(fx.get("status") or ""),
+                "utcDate": fx.get("utcDate") or fx.get("kickoff"),
             }
             for fx in fixtures
         ]
@@ -355,15 +388,36 @@ def api_league_predictions(code: str, days: int = Query(default=14, ge=1, le=60)
     if cached is not None:
         return cached
     try:
-        out = football_provider.get_predictions(comp_id, int(days))
+        # Pull upstream inputs explicitly so we can debug empties
+        fixtures = football_provider.get_fixtures(comp_id, int(days))
+        standings = football_provider.get_standings(comp_id)
+
+        warnings = []
+        if not fixtures:
+            warnings.append(f"No fixtures returned for next {days} days.")
+        if not standings:
+            warnings.append("No standings returned (provider/table unavailable).")
+
+        predictions = []
+        if fixtures and standings:
+            predictions = football_provider.get_predictions(comp_id, int(days)) or []
     except ProviderError as err:
         return _provider_error_response(err)
     except Exception as err:
         return JSONResponse(status_code=500, content={"error": f"Failed to fetch predictions: {str(err)[:200]}"})
+
     payload = {
         "league": {"code": comp_id, "name": comp_id, "competition_id": comp_id},
         "days": days,
-        "predictions": out,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "provider": football_provider.__class__.__name__,
+        "counts": {
+            "fixtures": len(fixtures or []),
+            "standings": len(standings or []),
+            "predictions": len(predictions or []),
+        },
+        "warnings": warnings,
+        "predictions": list(predictions or []),
     }
     return _predictions_cache_set(comp_id, int(days), payload)
 
