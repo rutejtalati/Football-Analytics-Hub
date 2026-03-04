@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import requests
-from leagues import CURRENT_SEASON, LEAGUE_IDS
-from prediction import estimate_team_strengths, predict_fixture
+from backend.leagues import CURRENT_SEASON, LEAGUE_IDS
+from backend.prediction import estimate_team_strengths, predict_fixture
 
 
 @dataclass

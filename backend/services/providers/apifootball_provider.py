@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from cachetools import TTLCache
 
-from services.providers.football_provider import ProviderError
+from backend.services.providers.football_provider import ProviderError
 
 
 class ApiFootballProvider:

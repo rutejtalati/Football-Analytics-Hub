@@ -15,9 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from fpl_client import fetch_bootstrap, fetch_fixtures, get_next_gw
-from understat_client import fetch_understat_league_players, fetch_understat_league_teams
-from model import (
+from backend.fpl_client import fetch_bootstrap, fetch_fixtures, get_next_gw
+from backend.understat_client import fetch_understat_league_players, fetch_understat_league_teams
+from backend.model import (
     STATUS_MAP,
     appearance_probability,
     expected_points_if_appears,
@@ -26,8 +26,8 @@ from model import (
 )
 
 import requests
-from leagues import list_leagues
-from services.providers.football_provider import ProviderError, get_provider
+from backend.leagues import list_leagues
+from backend.services.providers.football_provider import ProviderError, get_provider
 
 BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BACKEND_DIR / ".env")

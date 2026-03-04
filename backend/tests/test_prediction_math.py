@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from services.providers.apifootball_provider import ApiFootballProvider
+from backend.services.providers.apifootball_provider import ApiFootballProvider
 
 
 class PredictionMathTests(unittest.TestCase):
